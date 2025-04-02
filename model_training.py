@@ -72,7 +72,7 @@ max_error = 1.0  # 假设最大MSE为1.0
 num_epochs = 50
 best_score = 0  # 记录最佳评分
 best_model_state = None  # 保存最佳模型状态
-train_history =
+# train_history =
 
 for epoch in range(num_epochs):
     model.train()

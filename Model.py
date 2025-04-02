@@ -1,10 +1,45 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 
 
+class BiLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, forecast_horizon):
+        super(BiLSTM, self).__init__()
+
+        self.num_layers = num_layers
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.forecast_horizon = forecast_horizon
+
+        # 定义双向LSTM层
+        self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.hidden_size,
+                            num_layers=self.num_layers, batch_first=True, bidirectional=True)
+
+        # 定义全连接层
+        self.fc1 = nn.Linear(self.hidden_size * 2, 20)  # 由于是双向，hidden_size要乘以2
+        self.fc2 = nn.Linear(20, self.forecast_horizon)
+
+        # Dropout层，防止过拟合
+        self.dropout = nn.Dropout(0.2)
+
+    def forward(self, x, device):
+        # 初始化隐藏状态和细胞状态
+        h_0 = torch.randn(self.num_layers * 2, x.size(0), self.hidden_size).to(device)  # 双向，所以乘以2
+        c_0 = torch.randn(self.num_layers * 2, x.size(0), self.hidden_size).to(device)
+
+        # 通过双向LSTM层进行前向传播
+        out, _ = self.lstm(x, (h_0, c_0))
+
+        # 只取最后一个时间步的输出（双向LSTM的输出将是[batch_size, time_steps, hidden_size*2]）
+        out = F.relu(self.fc1(out[:, -1, :]))  # 只取最后一个时间步的输出，经过全连接层1并激活
+        out = self.fc2(out)  # 输出层
+        return out
+
+
 class CNNBiLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers=1):
+    def __init__(self, input_size, hidden_size, output_size, forecast_horizon, num_layers=1):
         super(CNNBiLSTM, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -17,8 +52,7 @@ class CNNBiLSTM(nn.Module):
         )
 
         # BiLSTM层
-        self.bilstm = nn.LSTM(input_size=64, hidden_size=hidden_size, num_layers=num_layers,
-                              batch_first=True, bidirectional=True)
+        self.bilstm = BiLSTM(input_size=64, hidden_size=hidden_size, num_layers=num_layers, forecast_horizon=forecast_horizon)
 
         # 全连接层
         self.fc = nn.Linear(hidden_size * 2, output_size)
