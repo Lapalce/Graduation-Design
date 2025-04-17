@@ -4,125 +4,38 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 
 
-class BiLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, forecast_horizon):
-        super(BiLSTM, self).__init__()
-
-        self.num_layers = num_layers
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.forecast_horizon = forecast_horizon
-
-        # 定义双向LSTM层
-        self.lstm = nn.LSTM(input_size=self.input_size, hidden_size=self.hidden_size,
-                            num_layers=self.num_layers, batch_first=True, bidirectional=True)
-
-        # 定义全连接层
-        self.fc1 = nn.Linear(self.hidden_size * 2, 20)  # 由于是双向，hidden_size要乘以2
-        self.fc2 = nn.Linear(20, self.forecast_horizon)
-
-        # Dropout层，防止过拟合
-        self.dropout = nn.Dropout(0.2)
-
-    def forward(self, x, device):
-        # 初始化隐藏状态和细胞状态
-        h_0 = torch.randn(self.num_layers * 2, x.size(0), self.hidden_size).to(device)  # 双向，所以乘以2
-        c_0 = torch.randn(self.num_layers * 2, x.size(0), self.hidden_size).to(device)
-
-        # 通过双向LSTM层进行前向传播
-        out, _ = self.lstm(x, (h_0, c_0))
-
-        # 只取最后一个时间步的输出（双向LSTM的输出将是[batch_size, time_steps, hidden_size*2]）
-        out = F.relu(self.fc1(out[:, -1, :]))  # 只取最后一个时间步的输出，经过全连接层1并激活
-        out = self.fc2(out)  # 输出层
-        return out
-
-
-class CNNBiLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, forecast_horizon, num_layers=1):
-        super(CNNBiLSTM, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-
-        # CNN层
-        self.cnn = nn.Sequential(
-            nn.Conv1d(in_channels=input_size, out_channels=64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2)
-        )
-
-        # BiLSTM层
-        self.bilstm = BiLSTM(input_size=64, hidden_size=hidden_size, num_layers=num_layers, forecast_horizon=forecast_horizon)
-
-        # 全连接层
-        self.fc = nn.Linear(hidden_size * 2, output_size)
+class RegionCNN(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(RegionCNN, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3)
 
     def forward(self, x):
-        # 输入形状: (batch_size, seq_length, input_size)
-        x = x.permute(0, 2, 1)  # 转换为 (batch_size, input_size, seq_length)
-
-        # CNN
-        x = self.cnn(x)  # 输出形状: (batch_size, 64, seq_length // 2)
-        x = x.permute(0, 2, 1)  # 转换为 (batch_size, seq_length // 2, 64)
-
-        # BiLSTM
-        h_lstm, _ = self.bilstm(x)  # 输出形状: (batch_size, seq_length // 2, hidden_size * 2)
-
-        # 取最后一个时间步的输出
-        out = self.fc(h_lstm[:, -1, :])  # 输出形状: (batch_size, output_size)
-        return out
+        x = self.conv1(x)  # [batch_size, out_channels, sequence_length]
+        x = F.relu(x)
+        x = self.conv2(x)  # [batch_size, out_channels, sequence_length]
+        return x
 
 
-class GNNLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers=1):
-        super(GNNLSTM, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-
-        # GNN层
-        self.gcn1 = GCNConv(input_size, hidden_size)
-        self.gcn2 = GCNConv(hidden_size, hidden_size)
-
-        # LSTM层
-        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, batch_first=True)
-
-        # 全连接层
-        self.fc = nn.Linear(hidden_size, output_size)
-
-    def forward(self, x, edge_index):
-        # GNN
-        x = self.gcn1(x, edge_index)
-        x = torch.relu(x)
-        x = self.gcn2(x, edge_index)
-        x = torch.relu(x)
-
-        # LSTM
-        h_lstm, _ = self.lstm(x)
-
-        # 全连接层
-        out = self.fc(h_lstm[:, -1, :])
-        return out
-
-
-class SPos_CNNBiLSTM(nn.Module):
+class PS_RegionBiLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_layers=1, sparse_layer_size=128, dropout_rate=0.5):
-        super(CNNBiLSTM, self).__init__()
+        super(PS_RegionBiLSTM, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
 
-        # CNN层
-        self.cnn = nn.Sequential(
-            nn.Conv1d(in_channels=input_size, out_channels=64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2))
+        # 3 个局部区域的卷积层，每个区域提取不同特征
+        self.region1 = RegionCNN(input_size[0][0], input_size[1][0])  # 第一个区域输入12个特征，输出6个特征
+        self.region2 = RegionCNN(input_size[0][1], input_size[1][1])  # 第二个区域输入6个特征，输出3个特征
+        self.region3 = RegionCNN(input_size[0][2], input_size[1][2])  # 第三个区域输入6个特征，输出3个特征
+        self.region4 = RegionCNN(input_size[0][3], input_size[1][3])  # 第三个区域输入6个特征，输出3个特征
 
         # BiLSTM层
-        self.bilstm = nn.LSTM(input_size=64, hidden_size=hidden_size, num_layers=num_layers,
+        self.bilstm = nn.LSTM(input_size=sum(input_size[1]), hidden_size=hidden_size, num_layers=num_layers,
                               batch_first=True, bidirectional=True)
 
         # 稀疏层
         self.sparse_layer = nn.Sequential(
-            nn.Linear(hidden_size * 2, sparse_layer_size),
+            nn.Linear(hidden_size * 2, sparse_layer_size),  # 双向LSTM的输出大小是 2 * hidden_size
             nn.ReLU(),
             nn.Dropout(dropout_rate)
         )
@@ -131,72 +44,41 @@ class SPos_CNNBiLSTM(nn.Module):
         self.fc = nn.Linear(sparse_layer_size, output_size)
 
     def forward(self, x):
-        # 输入形状: (batch_size, seq_length, input_size)
-        x = x.permute(0, 2, 1)  # 转换为 (batch_size, input_size, seq_length)
+        # 第一组特征（前 12 个特征）
+        x1 = x[:, :, :12]  # [batch_size, 30, 12]
+        x1 = x1.permute(0, 2, 1)  # [batch_size, 12, 30]
+        x1 = self.region1(x1)  # [batch_size, 6, 30]
 
-        # CNN
-        x = self.cnn(x)  # 输出形状: (batch_size, 64, seq_length // 2)
-        x = x.permute(0, 2, 1)  # 转换为 (batch_size, seq_length // 2, 64)
+        # 第二组特征（第 13 到第 18 个特征）
+        x2 = x[:, :, 12:18]  # [batch_size, 30, 6]
+        x2 = x2.permute(0, 2, 1)  # [batch_size, 6, 30]
+        x2 = self.region2(x2)  # [batch_size, 3, 30]
 
-        # BiLSTM
-        h_lstm, _ = self.bilstm(x)  # 输出形状: (batch_size, seq_length // 2, hidden_size * 2)
+        # 第三组特征（第 19 到第 24 个特征）
+        x3 = x[:, :, 18:24]  # [batch_size, 30, 6]
+        x3 = x3.permute(0, 2, 1)  # [batch_size, 6, 30]
+        x3 = self.region3(x3)  # [batch_size, 3, 30]
+
+        # 第四组特征（第 24 到第 30 个特征）
+        x4 = x[:, :, 24:]  # [batch_size, 30, 6]
+        x4 = x4.permute(0, 2, 1)  # [batch_size, 6, 30]
+        x4 = self.region4(x4)  # [batch_size, 3, 30]
+
+        # 合并所有局部区域的特征，沿着特征维度（第二维）拼接
+        x = torch.cat([x1, x2, x3], dim=1)  # [batch_size, 30, 12]
+
+        # 将输入调整为 [batch_size, 30, features] 以适应 LSTM
+        x = x.permute(0, 2, 1)  # [batch_size, 30, 12] -> [batch_size, 30, features]
+
+        # 双向 LSTM
+        lstm_out, _ = self.bilstm(x)
 
         # 取最后一个时间步的输出
-        h_lstm_last = h_lstm[:, -1, :]  # 输出形状: (batch_size, hidden_size * 2)
+        lstm_out = lstm_out[:, -1, :]  # [batch_size, hidden_size * 2]
 
         # 稀疏层
-        sparse_output = self.sparse_layer(h_lstm_last)  # 输出形状: (batch_size, sparse_layer_size)
+        sparse_output = self.sparse_layer(lstm_out)  # [batch_size, sparse_layer_size]
 
         # 全连接层
-        out = self.fc(sparse_output)  # 输出形状: (batch_size, output_size)
-        return out
-
-
-class SPre_CNNBiLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers=1, sparse_layer_size=128, dropout_rate=0.5):
-        super(CNNBiLSTM, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-
-        # 稀疏层（放在最前面）
-        self.sparse_layer = nn.Sequential(
-            nn.Linear(input_size, sparse_layer_size),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate)
-        )
-
-        # CNN层
-        self.cnn = nn.Sequential(
-            nn.Conv1d(in_channels=sparse_layer_size, out_channels=64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2))
-
-        # BiLSTM层
-        self.bilstm = nn.LSTM(input_size=64, hidden_size=hidden_size, num_layers=num_layers,
-                              batch_first=True, bidirectional=True)
-
-        # 全连接层
-        self.fc = nn.Linear(hidden_size * 2, output_size)
-
-    def forward(self, x):
-        # 输入形状: (batch_size, seq_length, input_size)
-        batch_size, seq_length, input_size = x.shape
-
-        # 稀疏层（对每个时间步的特征进行稀疏化）
-        x = x.view(-1, input_size)  # 转换为 (batch_size * seq_length, input_size)
-        x = self.sparse_layer(x)  # 输出形状: (batch_size * seq_length, sparse_layer_size)
-        x = x.view(batch_size, seq_length, -1)  # 转换回 (batch_size, seq_length, sparse_layer_size)
-
-        # 转换为 (batch_size, sparse_layer_size, seq_length)
-        x = x.permute(0, 2, 1)
-
-        # CNN
-        x = self.cnn(x)  # 输出形状: (batch_size, 64, seq_length // 2)
-        x = x.permute(0, 2, 1)  # 转换为 (batch_size, seq_length // 2, 64)
-
-        # BiLSTM
-        h_lstm, _ = self.bilstm(x)  # 输出形状: (batch_size, seq_length // 2, hidden_size * 2)
-
-        # 取最后一个时间步的输出
-        out = self.fc(h_lstm[:, -1, :])  # 输出形状: (batch_size, output_size)
+        out = self.fc(sparse_output)  # [batch_size, output_size]
         return out

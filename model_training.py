@@ -1,43 +1,70 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import numpy as np
 import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
+from torch.utils.data import Dataset, DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import DataLoader, TensorDataset
+from datetime import datetime
 
 import Model
 import function as f
 
+torch.manual_seed(12321)
+
+start_date_str = "20150101"
+end_date_str = "20250331"
+
+start_date = datetime.strptime(start_date_str, "%Y%m%d").date()
+end_date = datetime.strptime(end_date_str, "%Y%m%d").date()
+
+seq_length = 30  # 训练时间跨度
+step = 7  # 预测时间跨度
+
 # 读取数据
-data = pd.read_csv('./Data/000001.csv')
+path = 'D:/GitHub/Graduation-Design/Data/'
+stock = 'single_stock/000001.csv'
+file = f'{path}{stock}'
+data = pd.read_csv(file)
+
+# 合并指数数据
+a_index_list = ['sh000001', 'sz399001', 'sz399006', 'sh000905', 'sh000300', 'sz399300']
+a_index_name = ['sh', 'sz', 'cy', 'zz500', 'hs300', 'sz100']
+
+for index, code in enumerate(a_index_list):
+    tmp_df = pd.read_csv(f'{path}a_index_data/{code}.csv')
+    tmp_df = tmp_df.rename(columns={'close': a_index_name[index]})
+    data = pd.merge(data, tmp_df[['date', a_index_name[index]]], on='date', how='left')
+
+data['date'] = pd.to_datetime(data['date']).dt.date
+data = data[(data['date'] >= start_date) & (data['date'] <= end_date)]
+
+data.set_index('date', inplace=True)
 
 # 选择需要的特征
-features = ['开盘', '收盘', '最高', '最低', '振幅', '涨跌幅', '涨跌额', '成交量', '成交额', '换手率']
+features = ['open', 'close', 'high', 'low', 'amplitude', 'pct_change', 'change', 'turnover',
+            'volume_log', 'volume_log_diff', 'amount', 'amount_log'
+            , 'close', 'p_SMA:5', 'p_SMA:10', 'p_SMA:20', 'p_SMA:30', 'p_SMA:60'
+            , 'volume_log', 'v_log_SMA:5', 'v_log_SMA:10', 'v_log_SMA:20', 'v_log_SMA:30', 'v_log_SMA:60'
+            #            , 'p_WMA:5', 'p_WMA:10', 'p_WMA:20', 'p_WMA:30', 'p_WMA:60'
+            #            , 'v_log_WMA:5', 'v_log_WMA:10', 'v_log_WMA:20', 'v_log_WMA:30', 'v_log_WMA:60'
+            #            , 'p_EMA:5', 'p_EMA:10', 'p_EMA:20', 'p_EMA:30', 'p_EMA:60'
+            #            , 'v_log_EMA:5', 'v_log_EMA:10', 'v_log_EMA:20', 'v_log_EMA:30', 'v_log_EMA:60'
+            , 'close', 'sh', 'sz', 'cy', 'zz500', 'hs300', 'sz100'
+            ]
 data = data[features]
 
 # 数据归一化
 scaler = MinMaxScaler()
 data_scaled = scaler.fit_transform(data)
 
-
-# 将数据转换为时间序列格式
-def create_sequences(df, seq_len):
-    xs, ys = [], []
-    for i in range(len(df) - seq_len):
-        x = df[i:i + seq_len]
-        y = df[i + seq_len]
-        xs.append(x)
-        ys.append(y)
-    return np.array(xs), np.array(ys)
-
-
-seq_length = 30  # 选择30天的历史数据作为输入
-X, y = create_sequences(data_scaled, seq_length)
+X_seq, y_seq = f.create_sequences(data_scaled, seq_length, step)
 
 # 将数据转换为PyTorch张量
-X = torch.tensor(X, dtype=torch.float32)
-y = torch.tensor(y, dtype=torch.float32)
+X = torch.tensor(X_seq, dtype=torch.float32)
+y = torch.tensor(y_seq, dtype=torch.float32)
 
 # 划分训练集和验证集
 train_size = int(0.8 * len(X))
@@ -49,31 +76,23 @@ train_dataset = TensorDataset(X_train, y_train)
 val_dataset = TensorDataset(X_val, y_val)
 
 batch_size = 32
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-input_size = X.shape[2]  # 特征数量
+input_size = [[12, 6, 6, 7], [24, 12, 12, 14]]  # 特征数量
 hidden_size = 64
-output_size = y.shape[1]  # 输出特征数量
+output_size = 5  # 输出特征数量
 sparse_layer_size = 128  # 稀疏层的大小
 dropout_rate = 0.5  # Dropout率
 
-# model = SPre_CNNBiLSTM(input_size, hidden_size, output_size, sparse_layer_size=sparse_layer_size, dropout_rate=dropout_rate)
-model = Model.CNNBiLSTM(input_size, hidden_size, output_size)
+model = Model.PS_RegionBiLSTM(input_size, hidden_size, output_size, sparse_layer_size=sparse_layer_size,
+                              dropout_rate=dropout_rate)
 
 # 定义损失函数和优化器
-criterion = nn.MSELoss()
+criterion = f.calculate_score
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# 定义最大误差（根据历史数据或经验设定）
-max_error = 1.0  # 假设最大MSE为1.0
-
-# 训练循环
-num_epochs = 50
-best_score = 0  # 记录最佳评分
-best_model_state = None  # 保存最佳模型状态
-# train_history =
-
+num_epochs = 60
 for epoch in range(num_epochs):
     model.train()
     train_loss = 0
@@ -82,7 +101,7 @@ for epoch in range(num_epochs):
 
         # 前向传播
         outputs = model(batch_X)
-        loss = criterion(outputs, batch_y)
+        loss = criterion(batch_y, outputs)
 
         # 反向传播和优化
         loss.backward()
@@ -90,51 +109,12 @@ for epoch in range(num_epochs):
 
         train_loss += loss.item()
 
-    # 计算训练集评分
-    train_score = f.calculate_score(batch_y.numpy(), outputs.detach().numpy(), max_error)
-
     # 验证模型
     model.eval()
     val_loss = 0
-    val_preds, val_targets = [], []
     with torch.no_grad():
         for batch_X, batch_y in val_loader:
             outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
+            loss = criterion(batch_y, outputs)
             val_loss += loss.item()
-
-            # 收集验证集的预测值和实际值
-            val_preds.append(outputs.numpy())
-            val_targets.append(batch_y.numpy())
-
-    # 计算验证集评分
-    val_preds = np.concatenate(val_preds, axis=0)
-    val_targets = np.concatenate(val_targets, axis=0)
-    val_score = f.calculate_score(val_targets, val_preds, max_error)
-
-    # 打印训练和验证结果
-    print(f'Epoch [{epoch + 1}/{num_epochs}], Train Loss: {train_loss / len(train_loader):.4f}, '
-          f'Train Score: {train_score:.4f}, Val Loss: {val_loss / len(val_loader):.4f}, '
-          f'Val Score: {val_score:.4f}')
-
-
-
-    # 保存最佳模型
-    if val_score > best_score:
-        best_score = val_score
-        best_model_state = model.state_dict()
-        print(f'New best model saved with score: {best_score:.4f}')
-
-# 使用最后一天的数据进行验证
-model.eval()
-with torch.no_grad():
-    last_day_data = X[-1].unsqueeze(0)  # 添加批次维度
-    predicted = model(last_day_data)
-    predicted = scaler.inverse_transform(predicted.numpy())
-    actual = scaler.inverse_transform(y[-1].unsqueeze(0).numpy())
-
-    print(f'Predicted: {predicted}, \nActual   : {actual}')
-
-# 保存模型
-log_file = './logger/ori_cnn_bilstm_model_01.pth'
-torch.save(model.state_dict(), log_file)
+    print(f'Epoch [{epoch + 1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
