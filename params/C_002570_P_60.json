@@ -1,0 +1,15 @@
+{
+    "model_name": "PSRegionBiLSTM",
+    "stock_type": "C",
+    "stock": "002570",
+    "seq_length": 120,
+    "step": 60,
+    "start_date_str": "20150101",
+    "end_date_str": "20250331",
+    "batch_size": 8,
+    "hidden_size": 64,
+    "output_size": 5,
+    "sparse_layer_size": 128,
+    "dropout_rate": 0.5,
+    "num_epochs": 120
+}

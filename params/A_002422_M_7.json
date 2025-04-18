@@ -1,0 +1,15 @@
+{
+    "model_name": "MSRegionBiLSTM",
+    "stock_type": "A",
+    "stock": "002422",
+    "seq_length": 30,
+    "step": 7,
+    "start_date_str": "20150101",
+    "end_date_str": "20250331",
+    "batch_size": 32,
+    "hidden_size": 64,
+    "output_size": 5,
+    "sparse_layer_size": 128,
+    "dropout_rate": 0.5,
+    "num_epochs": 120
+}
