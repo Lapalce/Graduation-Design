@@ -1,8 +1,11 @@
+import math
+
 import numpy as np
 import pandas as pd
 import json
 from datetime import datetime
 import pickle
+import time
 
 import torch
 import torch.optim as optim
@@ -42,26 +45,29 @@ def load_pkl_file(filename):
 
 
 def calculate_score(y_true, y_pred):
+    # print(y_true)
     loss = abs((y_pred - y_true) / y_true)
 
     # 定义每个特征的权重
     weights = torch.tensor([0.11, 0.60, 0.11, 0.11, 0.17])  # 增加close的权重
 
     # 使用加权平方损失
-    weighted_loss = (loss ** 2) * weights  # 通过平方增加惩罚力度
+    weighted_loss = (loss ** 2) * weights  # 通过平方加大惩罚力度
     total_loss = weighted_loss.sum()
 
     return total_loss
 
 
-def create_sequences(data, seq_length, step):
-    xs, ys = [], []
+def create_sequences(data, seq_length, step, date):
+    xs, ys, ds = [], [], []
     for i in range(0, len(data) - seq_length - step, seq_length):
         x = data[i:i + seq_length]
         y = data[i + seq_length + step][[0, 1, 2, 3, 8]]
+        d = date[i + seq_length + step]
         xs.append(x)
         ys.append(y)
-    return np.array(xs), np.array(ys)
+        ds.append(d)
+    return np.array(xs), np.array(ys), np.array(ds)
 
 
 def load_data(start_date_str, end_date_str, stock, seq_length, step):
@@ -97,7 +103,8 @@ def load_data(start_date_str, end_date_str, stock, seq_length, step):
     # 将index设置成日期
     data['date'] = pd.to_datetime(data['date']).dt.date
     data = data[(data['date'] >= start_date) & (data['date'] <= end_date)]
-
+    date_list = data['date'].tolist()
+    date_list = [date.strftime('%Y-%m-%d') for date in date_list]
     data.set_index('date', inplace=True)
 
     # 选择需要的特征
@@ -110,21 +117,21 @@ def load_data(start_date_str, end_date_str, stock, seq_length, step):
     scaler = RobustScaler()
     data_scaled = scaler.fit_transform(data)
 
-    X_seq, y_seq = create_sequences(data_scaled, seq_length, step)
+    X_seq, y_seq, date_seq = create_sequences(data_scaled, seq_length, step, date_list)
 
     # 将数据转换为PyTorch张量
     X = torch.tensor(X_seq, dtype=torch.float32)
     y = torch.tensor(y_seq, dtype=torch.float32)
+    return X, y, date_seq
 
-    return X, y
 
-
-def train_model(X, y, batch_size, model, hidden_size, output_size, sparse_layer_size, dropout_rate
+def train_model(X, y, date_seq, batch_size, model, hidden_size, output_size, sparse_layer_size, dropout_rate
                 , num_epochs, model_save_path, his_save_path):
     # 划分训练集和验证集
     train_size = int(0.8 * len(X))
     X_train, X_val = X[:train_size], X[train_size:]
     y_train, y_val = y[:train_size], y[train_size:]
+    _, date_val = date_seq[:train_size], date_seq[train_size:]
 
     # 创建DataLoader
     train_dataset = TensorDataset(X_train, y_train)
@@ -132,6 +139,7 @@ def train_model(X, y, batch_size, model, hidden_size, output_size, sparse_layer_
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    date_loader = DataLoader(date_val, batch_size=batch_size, shuffle=False)
 
     input_size = [[], []]  # 特征数量
     for key, value in feature_groups.items():
@@ -146,9 +154,11 @@ def train_model(X, y, batch_size, model, hidden_size, output_size, sparse_layer_
     # 储存输出数据
     train_loss_his = []
     val_loss_his = []
+    date_his = []
     pre_y_his = []
 
     print('开始模型训练')
+    start_time = time.time()
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0
@@ -158,11 +168,14 @@ def train_model(X, y, batch_size, model, hidden_size, output_size, sparse_layer_
             # 前向传播
             outputs = model(batch_X)
             loss = criterion(batch_y, outputs)
-            pre_y_his.append(outputs)
 
             # 反向传播和优化
             loss.backward()
             optimizer.step()
+            if math.isnan(loss.item()):
+                raise ValueError("loss is nan")
+            elif math.isinf(loss.item()):
+                raise ValueError("loss is inf")
 
             train_loss += loss.item()
 
@@ -170,15 +183,22 @@ def train_model(X, y, batch_size, model, hidden_size, output_size, sparse_layer_
         model.eval()
         val_loss = 0
         with torch.no_grad():
-            for batch_X, batch_y in val_loader:
+            for (batch_X, batch_y), date_batch in zip(val_loader, date_loader):
                 outputs = model(batch_X)
+                pre_y_his.append(outputs)
+                date_his.append(date_batch)
                 loss = criterion(batch_y, outputs)
+                if math.isnan(loss.item()):
+                    raise ValueError("loss is nan")
+                elif math.isinf(loss.item()):
+                    raise ValueError("loss is inf")
                 val_loss += loss.item()
 
         train_loss_his.append(train_loss)
         val_loss_his.append(val_loss)
         print(f'Epoch [{epoch + 1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
 
+    end_time = time.time()
     torch.save(model.state_dict(), model_save_path)
     print(f"模型的权重已保存到 {model_save_path}")
 
@@ -186,7 +206,9 @@ def train_model(X, y, batch_size, model, hidden_size, output_size, sparse_layer_
         pickle.dump({
             'train_loss_his': train_loss_his,
             'val_loss_his': val_loss_his,
-            'pre_y_his': pre_y_his
+            'date_his': date_his,
+            'pre_y_his': pre_y_his,
+            'time_spend': end_time - start_time
         }, f)
 
     print(f"数据已保存到{his_save_path}")
